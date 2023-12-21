@@ -3,14 +3,17 @@ using System.IO;
 using System.Net.Http;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
 
 class Program
 {
     static string BaseUrl = "http://ec2-3-138-190-113.us-east-2.compute.amazonaws.com/index.php?";
-    static string[] Entries;
+    static API? api { get; set; }
+    static List<Fruit>? Fruits {  get; set; }
     static async Task Main()
     {
-        await GetDBEntries();
+        api = new API(BaseUrl);
+
         Print(new string[]
         {
             "------------------------------------",
@@ -21,7 +24,9 @@ class Program
 
     static async Task LoopAsync()
     {
-        await GetDBEntries();
+        if (api == null) throw new NullReferenceException(nameof(api));
+        await api.AsyncGET("get-fruit");
+        Fruits = JsonConvert.DeserializeObject<List<Fruit>>(api.GETResult ?? throw new NullReferenceException(nameof(api.GETResult)));
 
         Print("------------------------------------");
         int answer = MultiQuestion("What would you like to do",
@@ -44,7 +49,8 @@ class Program
             case 1: 
                 Console.Clear();
                 Print("------------------------------------");
-                Print(Entries, "--"); 
+                if(Fruits == null) throw new NullReferenceException(nameof(Fruits));
+                Print(Fruits.ToArray(), "--");
             break;
             case 2:
                 Console.Clear();
@@ -61,7 +67,7 @@ class Program
         if(BoolQuestion("Do something else", "y", "n"))
         {
             Console.Clear();
-            LoopAsync();
+            await LoopAsync();
         }
         else
         {
@@ -69,68 +75,6 @@ class Program
             Console.ReadKey();
         }
     }
-
-    static async Task CallUrlAsync(string request)
-    {
-        using (HttpClient httpClient = new HttpClient())
-        {
-            try
-            {
-                HttpResponseMessage response = await httpClient.GetAsync($"{BaseUrl}{request}");
-
-                if (response.IsSuccessStatusCode)
-                {
-                    string urlText = await response.Content.ReadAsStringAsync();
-                    Console.WriteLine(urlText);
-                }
-                else
-                {
-                    Console.WriteLine($"Error: {response.StatusCode} - {response.ReasonPhrase}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error: {ex.Message}");
-            }
-        }
-    }
-
-    #region DB Entries
-    static async Task GetDBEntries()
-    {
-        using (HttpClient httpClient = new HttpClient())
-        {
-            try
-            {
-                HttpResponseMessage response = await httpClient.GetAsync($"{BaseUrl}print-fruit=true");
-
-                if (response.IsSuccessStatusCode)
-                {
-                    string urlText = await response.Content.ReadAsStringAsync();
-                    string[] entries = ParseUrlContent(urlText);
-                    SetEntries(entries);
-                }
-                else
-                {
-                    Console.WriteLine($"Error: {response.StatusCode} - {response.ReasonPhrase}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error: {ex.Message}");
-            }
-        }
-    }
-
-    static string[] ParseUrlContent(string content)
-    {
-        List<string> entries = content.Split("<br>").ToList();
-        entries.Remove(entries.Last());
-        return entries.ToArray();
-    }
-
-    static void SetEntries(string[] entries) => Entries = entries;
-    #endregion
 
     #region Add/Sub Fruit
     static async Task AddFruitAsync()
@@ -143,10 +87,14 @@ class Program
             "------------------------------------"
         });
         Console.Write("Name: ");
-        name = Console.ReadLine();
+        name = Console.ReadLine() ?? "default";
         if(BoolQuestion($"Is {name} correct","y","n"))
         {
-            await CallUrlAsync($"add-fruit={name}");
+            if(api == null) throw new NullReferenceException(nameof(api));
+            await api.AsyncPOST(new Dictionary<string, string>
+            {
+                {"add-fruit", name}
+            });
         }
         else
         {
@@ -157,13 +105,18 @@ class Program
 
     static async Task RemoveFruitAsync()
     {
-        string name;
+        if(Fruits == null) throw new NullReferenceException(nameof(Fruits));
+        string[] options = Fruits.Select(fruit => fruit.name).ToArray();
         Print("------------------------------------");
-        int answer = MultiQuestion("Which entry to remove", Entries);
-        name = Entries[answer - 1];
+        int answer = MultiQuestion("Which entry to remove", options);
+        string name = options[answer - 1];
         if (BoolQuestion($"Is {name} correct", "y", "n"))
         {
-            await CallUrlAsync($"remove-fruit={name}");
+            if (api == null) throw new NullReferenceException(nameof(api));
+            await api.AsyncPOST(new Dictionary<string, string>
+            {
+                {"remove-fruit", name}
+            });
         }
         else
         {
@@ -184,11 +137,11 @@ class Program
         }
     }
 
-    static void Print(string[] lines, string header)
+    static void Print(object[] entities, string header)
     {
-        foreach (string line in lines)
+        foreach (object entity in entities)
         {
-            Console.WriteLine($"{header} {line}");
+            Console.WriteLine($"{header} {entity}");
         }
     }
     #endregion
@@ -222,4 +175,59 @@ class Program
         return answer;
     }
     #endregion
+}
+
+public class API
+{
+    private string? url;
+    private static readonly HttpClient client = new HttpClient();
+    public void SetUrl(string url) => this.url = url;
+
+    public string? GETResult { get; internal set; }
+
+    public API()
+    {
+
+    }
+
+    public API(string url)
+    {
+        this.url = url;
+    }
+
+    public async Task AsyncPOST(IDictionary<string, string> values)
+    {
+        var request = new FormUrlEncodedContent(values);
+        var response = await client.PostAsync(url, request);
+        var asString = await response.Content.ReadAsStringAsync();
+    }
+
+    public async Task AsyncGET(string method)
+    {
+        var request = url + method;
+        var response = await client.GetAsync(request);
+        GETResult = await response.Content.ReadAsStringAsync();
+    }
+}
+
+public class Fruit
+{
+    public int id { get; set; }
+
+    public string name { get; set; }
+
+    public Fruit() 
+    {
+        id = 0;
+        name = "";
+    }
+
+    public Fruit(int id, string name)
+    {
+        this.id = id;
+        this.name = name;
+    }
+
+    public override string ToString() =>
+        $"| id: {id} | name: {name} |";
 }
